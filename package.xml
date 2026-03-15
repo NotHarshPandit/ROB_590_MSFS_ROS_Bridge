@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>msfs_sensor_node</name>
+  <version>0.0.1</version>
+  <description>MSFS sensor and control bridge via SimConnect</description>
+
+  <maintainer email="harshpan@example.com">Harsh</maintainer>
+  <license>MIT</license>
+
+  <!-- IMPORTANT: ONLY ament_cmake here, NO catkin -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>rclcpp</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+
+  <exec_depend>rclcpp</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+
+  <export>
+    <!-- DO NOT put <build_type>catkin</build_type> here -->
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
