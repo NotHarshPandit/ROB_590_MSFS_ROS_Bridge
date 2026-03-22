@@ -107,6 +107,7 @@ add_executable(msfs_sensor_node src/msfs_sensor_node.cpp)
 ament_target_dependencies(msfs_sensor_node
   rclcpp
   std_msgs
+  geometry_msgs
 )
 
 target_link_libraries(msfs_sensor_node
