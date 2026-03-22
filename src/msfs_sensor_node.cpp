@@ -1,10 +1,13 @@
 #include <chrono>
 #include <iostream>
 #include <sstream>
-#include <iomanip>   // <-- needed for std::fixed, std::setprecision
+#include <iomanip>
+#include <functional>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/float32.hpp"
+#include "geometry_msgs/msg/vector3.hpp"
 
 #include <windows.h>
 #include "SimConnect.h"
@@ -23,34 +26,33 @@ enum DATA_REQUEST_ID {
 struct AircraftData
 {
   // Basic flight data
-  double airspeed_indicated_kts;      // AIRSPEED INDICATED (knots)
-  double altitude_ft;                 // INDICATED ALTITUDE (feet)
-  double roll_deg;                    // PLANE BANK DEGREES (degrees)
-  double pitch_deg;                   // PLANE PITCH DEGREES (degrees)
-  double heading_mag_deg;             // PLANE HEADING DEGREES MAGNETIC (degrees)
-  double dir_gyro_deg;                // HEADING INDICATOR (degrees)
-  double vertical_speed_fpm;          // VERTICAL SPEED (ft/min)
-  double side_slip_deg;               // SIDE SLIP ANGLE (degrees)
-  double baro_setting_inhg;           // KOHLSMAN SETTING HG (inHg)
+  double airspeed_indicated_kts;
+  double altitude_ft;
+  double roll_deg;
+  double pitch_deg;
+  double heading_mag_deg;
+  double dir_gyro_deg;
+  double vertical_speed_fpm;
+  double side_slip_deg;
+  double baro_setting_inhg;
 
   // GPS position
-  double gps_lat_deg;                 // GPS POSITION LAT (degrees)
-  double gps_lon_deg;                 // GPS POSITION LON (degrees)
-  double gps_alt_ft;                  // GPS POSITION ALT (feet)
+  double gps_lat_deg;
+  double gps_lon_deg;
+  double gps_alt_ft;
 
   // Engine
-  double eng1_rpm;                    // GENERAL ENG RPM:1 (rpm)
+  double eng1_rpm;
 
   // Controls / inputs
-  double yoke_aileron;                // AILERON POSITION (normalized -1..1)
-  double yoke_elevator;               // ELEVATOR POSITION (normalized -1..1)
-  double rudder;                      // RUDDER POSITION (normalized -1..1)
-  double brake_left_pct;              // BRAKE LEFT POSITION (percent)
-  double brake_right_pct;             // BRAKE RIGHT POSITION (percent)
-  double flaps_handle_pct;            // FLAPS HANDLE PERCENT (0..100)
-  double trim_pct;                    // ELEVATOR TRIM PCT (0..100)
-  double throttle1_pct;               // GENERAL ENG THROTTLE LEVER POSITION:1 (percent)
-  double mixture1_pct;                // GENERAL ENG MIXTURE LEVER POSITION:1 (percent)
+  double yoke_aileron;      // [-1..1]
+  double yoke_elevator;     // [-1..1]
+  double rudder;            // [-1..1]
+  double parking_brake;     // 0 = off, >0 = on (from BRAKE PARKING POSITION, 0..32767)
+  double flaps_handle_pct;  // 0..100
+  double trim_pct;          // 0..100
+  double throttle1_pct;     // 0..100
+  double mixture1_pct;      // 0..100
 };
 
 class MsfsSensorNode : public rclcpp::Node
@@ -62,8 +64,34 @@ public:
   {
     RCLCPP_INFO(get_logger(), "Starting MSFS sensor node...");
 
-    publisher_ = this->create_publisher<std_msgs::msg::String>(
+    // Human-readable debug publisher
+    sensor_string_pub_ = this->create_publisher<std_msgs::msg::String>(
       "/msfs/sensor_readings", 10);
+
+    // Replayable command/state publishers
+    attitude_pub_ = this->create_publisher<geometry_msgs::msg::Vector3>(
+      "/msfs/cmd/attitude", 10);
+
+    throttle_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+      "/msfs/cmd/throttle", 10);
+
+    flaps_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+      "/msfs/cmd/flaps", 10);
+
+    mixture_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+      "/msfs/cmd/mixture", 10);
+
+    trim_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+      "/msfs/cmd/trim", 10);
+
+    parking_brake_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+      "/msfs/cmd/parking_brake", 10);
+
+    baro_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+      "/msfs/cmd/baro", 10);
+
+    dg_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+      "/msfs/cmd/dg_deg", 10);
 
     // Try initial SimConnect connection
     HRESULT hr = SimConnect_Open(
@@ -86,7 +114,7 @@ public:
       request_data();
     }
 
-    // Timer: poll SimConnect ~20 Hz
+    // Poll SimConnect periodically
     timer_ = this->create_wall_timer(
       50ms, std::bind(&MsfsSensorNode::timer_callback, this));
   }
@@ -104,97 +132,90 @@ private:
     // ---- Basic flight data ----
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "AIRSPEED INDICATED", "knots");                 // airspeed_indicated_kts
+      "AIRSPEED INDICATED", "knots");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "INDICATED ALTITUDE", "feet");                  // altitude_ft
+      "INDICATED ALTITUDE", "feet");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "PLANE BANK DEGREES", "degrees");              // roll_deg (bank)
+      "PLANE BANK DEGREES", "degrees");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "PLANE PITCH DEGREES", "degrees");             // pitch_deg
+      "PLANE PITCH DEGREES", "degrees");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "PLANE HEADING DEGREES MAGNETIC", "degrees");  // heading_mag_deg
+      "PLANE HEADING DEGREES MAGNETIC", "degrees");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "HEADING INDICATOR", "degrees");               // dir_gyro_deg
+      "HEADING INDICATOR", "degrees");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "VERTICAL SPEED", "feet per minute");          // vertical_speed_fpm
+      "VERTICAL SPEED", "feet per minute");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "SIDE SLIP ANGLE", "degrees");                 // side_slip_deg
+      "INCIDENCE BETA", "degrees");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "KOHLSMAN SETTING HG", "inHg");                // baro_setting_inhg :contentReference[oaicite:1]{index=1}
+      "KOHLSMAN SETTING HG", "inHg");
 
     // ---- GPS coordinates ----
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "GPS POSITION LAT", "degrees");                // gps_lat_deg :contentReference[oaicite:2]{index=2}
+      "GPS POSITION LAT", "degrees");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "GPS POSITION LON", "degrees");                // gps_lon_deg
+      "GPS POSITION LON", "degrees");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "GPS POSITION ALT", "feet");                   // gps_alt_ft (SimConnect converts from meters)
+      "GPS POSITION ALT", "feet");
 
     // ---- Engine ----
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "GENERAL ENG RPM:1", "rpm");                   // eng1_rpm :contentReference[oaicite:3]{index=3}
+      "GENERAL ENG RPM:1", "rpm");
 
     // ---- Controls / inputs ----
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "AILERON POSITION", "position");               // yoke_aileron [-1..1] :contentReference[oaicite:4]{index=4}
+      "AILERON POSITION", "position");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "ELEVATOR POSITION", "position");              // yoke_elevator [-1..1]
+      "ELEVATOR POSITION", "position");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "RUDDER POSITION", "position");                // rudder [-1..1]
+      "RUDDER POSITION", "position");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "BRAKE LEFT POSITION", "percent");             // brake_left_pct :contentReference[oaicite:5]{index=5}
+      "BRAKE PARKING POSITION", "position");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "BRAKE RIGHT POSITION", "percent");            // brake_right_pct
+      "FLAPS HANDLE PERCENT", "percent over 100");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "FLAPS HANDLE PERCENT", "percent over 100");   // flaps_handle_pct :contentReference[oaicite:6]{index=6}
+      "ELEVATOR TRIM PCT", "percent over 100");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "ELEVATOR TRIM PCT", "percent over 100");      // trim_pct :contentReference[oaicite:7]{index=7}
+      "GENERAL ENG THROTTLE LEVER POSITION:1", "percent");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "GENERAL ENG THROTTLE LEVER POSITION:1", "percent"); // throttle1_pct :contentReference[oaicite:8]{index=8}
-
-    SimConnect_AddToDataDefinition(
-      hSimConnect_, DEFINITION_AIRCRAFT_DATA,
-      "GENERAL ENG MIXTURE LEVER POSITION:1", "percent");  // mixture1_pct
-
-    // No SimConnect_RegisterDataDefineStruct<T> helper in the MSFS 2024 headers,
-    // so we'll reinterpret the buffer as AircraftData manually.
+      "GENERAL ENG MIXTURE LEVER POSITION:1", "percent");
   }
 
   void request_data()
@@ -209,7 +230,8 @@ private:
       0, 0, 0);
 
     if (hr != S_OK) {
-      RCLCPP_ERROR(get_logger(),
+      RCLCPP_ERROR(
+        get_logger(),
         "SimConnect_RequestDataOnSimObject failed (hr=0x%08lx)", hr);
     } else {
       RCLCPP_INFO(get_logger(), "Requested aircraft data each sim frame.");
@@ -225,47 +247,89 @@ private:
     const AircraftData *data =
       reinterpret_cast<const AircraftData*>(&pObjData->dwData);
 
+    // -----------------------------
+    // 1) Publish human-readable debug string
+    // -----------------------------
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(3);
 
-    // --- Grouped exactly like your list ---
-
-    // 1) Primary flight instruments
     oss << "Airspeed: " << data->airspeed_indicated_kts << " kts\n";
     oss << "Altitude: " << data->altitude_ft << " ft (indicated)\n";
-    oss << "Roll: "    << data->roll_deg    << " deg\n";
-    oss << "Pitch: "   << data->pitch_deg   << " deg\n";
+    oss << "Roll: " << data->roll_deg << " deg\n";
+    oss << "Pitch: " << data->pitch_deg << " deg\n";
     oss << "Magnetic Heading: " << data->heading_mag_deg << " deg\n";
-    oss << "Directional Gyro:  " << data->dir_gyro_deg   << " deg\n";
-    oss << "Vertical Speed: "   << data->vertical_speed_fpm << " ft/min\n";
-    oss << "Side Slip: "        << data->side_slip_deg      << " deg\n";
-    oss << "Baro Setting: "     << data->baro_setting_inhg  << " inHg\n\n";
+    oss << "Directional Gyro: " << data->dir_gyro_deg << " deg\n";
+    oss << "Vertical Speed: " << data->vertical_speed_fpm << " ft/min\n";
+    oss << "Side Slip: " << data->side_slip_deg << " deg\n";
+    oss << "Baro Setting: " << data->baro_setting_inhg << " inHg\n\n";
 
-    // 2) GPS
     oss << "GPS Coordinates:\n";
-    oss << "  Lat: " << data->gps_lat_deg  << " deg\n";
-    oss << "  Lon: " << data->gps_lon_deg  << " deg\n";
-    oss << "  Alt: " << data->gps_alt_ft   << " ft\n\n";
+    oss << "  Lat: " << data->gps_lat_deg << " deg\n";
+    oss << "  Lon: " << data->gps_lon_deg << " deg\n";
+    oss << "  Alt: " << data->gps_alt_ft << " ft\n\n";
 
-    // 3) Engine
     oss << "Engine 1:\n";
     oss << "  RPM: " << data->eng1_rpm << " rpm\n\n";
 
-    // 4) Controls
     oss << "Controls / Inputs:\n";
-    oss << "  Yoke (Aileron):  " << data->yoke_aileron   << " [-1..1]\n";
-    oss << "  Yoke (Elevator): " << data->yoke_elevator  << " [-1..1]\n";
-    oss << "  Rudder:          " << data->rudder         << " [-1..1]\n";
-    oss << "  Brakes Left:     " << data->brake_left_pct  << " %\n";
-    oss << "  Brakes Right:    " << data->brake_right_pct << " %\n";
+    oss << "  Yoke (Aileron):  " << data->yoke_aileron << " [-1..1]\n";
+    oss << "  Yoke (Elevator): " << data->yoke_elevator << " [-1..1]\n";
+    oss << "  Rudder:          " << data->rudder << " [-1..1]\n";
+    oss << "  Parking Brake:   " << (data->parking_brake ? "ON" : "OFF") << "\n";
     oss << "  Flaps Handle:    " << data->flaps_handle_pct << " %\n";
-    oss << "  Elevator Trim:   " << data->trim_pct          << " %\n";
-    oss << "  Throttle 1:      " << data->throttle1_pct     << " %\n";
-    oss << "  Mixture 1:       " << data->mixture1_pct      << " %\n";
+    oss << "  Elevator Trim:   " << data->trim_pct << " %\n";
+    oss << "  Throttle 1:      " << data->throttle1_pct << " %\n";
+    oss << "  Mixture 1:       " << data->mixture1_pct << " %\n";
 
-    auto msg = std_msgs::msg::String();
-    msg.data = oss.str();
-    publisher_->publish(msg);
+    std_msgs::msg::String string_msg;
+    string_msg.data = oss.str();
+    sensor_string_pub_->publish(string_msg);
+
+    // -----------------------------
+    // 2) Publish replayable command topics
+    // -----------------------------
+
+    // attitude: x=aileron, y=elevator, z=rudder
+    geometry_msgs::msg::Vector3 attitude_msg;
+    attitude_msg.x = data->yoke_aileron;
+    attitude_msg.y = data->yoke_elevator;
+    attitude_msg.z = data->rudder;
+    attitude_pub_->publish(attitude_msg);
+
+    // throttle: normalize 0..100 -> 0..1
+    std_msgs::msg::Float32 throttle_msg;
+    throttle_msg.data = static_cast<float>(data->throttle1_pct / 100.0);
+    throttle_pub_->publish(throttle_msg);
+
+    // flaps: normalize 0..100 -> 0..1
+    std_msgs::msg::Float32 flaps_msg;
+    flaps_msg.data = static_cast<float>(data->flaps_handle_pct / 100.0);
+    flaps_pub_->publish(flaps_msg);
+
+    // mixture: normalize 0..100 -> 0..1
+    std_msgs::msg::Float32 mixture_msg;
+    mixture_msg.data = static_cast<float>(data->mixture1_pct / 100.0);
+    mixture_pub_->publish(mixture_msg);
+
+    // trim: normalize 0..100 -> 0..1
+    std_msgs::msg::Float32 trim_msg;
+    trim_msg.data = static_cast<float>(data->trim_pct / 100.0);
+    trim_pub_->publish(trim_msg);
+
+    // parking brake: 1 = engaged, 0 = disengaged
+    std_msgs::msg::Float32 parking_brake_msg;
+    parking_brake_msg.data = (data->parking_brake != 0.0) ? 1.0f : 0.0f;
+    parking_brake_pub_->publish(parking_brake_msg);
+
+    // baro setting in inHg
+    std_msgs::msg::Float32 baro_msg;
+    baro_msg.data = static_cast<float>(data->baro_setting_inhg);
+    baro_pub_->publish(baro_msg);
+
+    // directional gyro setting in degrees
+    std_msgs::msg::Float32 dg_msg;
+    dg_msg.data = static_cast<float>(data->dir_gyro_deg);
+    dg_pub_->publish(dg_msg);
   }
 
   void poll_simconnect()
@@ -301,7 +365,6 @@ private:
   void timer_callback()
   {
     if (!sim_connected_) {
-      // Periodically retry connecting
       static int counter = 0;
       if (++counter % 20 == 0) {
         RCLCPP_INFO(get_logger(), "Trying to reconnect to SimConnect...");
@@ -315,7 +378,8 @@ private:
           define_data();
           request_data();
         } else {
-          RCLCPP_WARN(get_logger(),
+          RCLCPP_WARN(
+            get_logger(),
             "SimConnect_Open still failing (hr=0x%08lx)", hr);
         }
       }
@@ -329,7 +393,19 @@ private:
   bool sim_connected_;
   bool g_running_{true};
 
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_;
+  // Debug publisher
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr sensor_string_pub_;
+
+  // Replayable control-state publishers
+  rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr attitude_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr throttle_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr flaps_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr mixture_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr trim_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr parking_brake_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr baro_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr dg_pub_;
+
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

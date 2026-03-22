@@ -26,24 +26,18 @@ enum EVENT_ID
   EVT_AXIS_THROTTLE1_SET,
   EVT_AXIS_FLAPS_SET,
   EVT_AXIS_ELEV_TRIM_SET,
-  EVT_AXIS_LEFT_BRAKE_SET,
-  EVT_AXIS_RIGHT_BRAKE_SET,
+  EVT_PARKING_BRAKE_SET,
+  EVT_KOHLSMAN_SET,
   EVT_AXIS_MIXTURE1_SET,
 };
 
 // Data definition IDs
 enum DATA_DEFINE_ID
 {
-  DEFINITION_BARO = 100,
-  DEFINITION_DG   = 101,
+  DEFINITION_DG           = 101,
 };
 
 // Structs for SetDataOnSimObject
-struct BaroData
-{
-  double kohlsman_inhg;   // "KOHLSMAN SETTING HG:1", inHg
-};
-
 struct GyroData
 {
   double heading_gyro_rad;  // "PLANE HEADING DEGREES GYRO", radians
@@ -124,17 +118,17 @@ public:
         this->trim_callback(msg);
       });
 
-    // Brakes (0..1)
-    sub_brake_ = this->create_subscription<std_msgs::msg::Float32>(
-      "/msfs/cmd/brake", 10,
+    // Parking brake: 1 = engage, 0 = disengage (std_msgs/Float32)
+    sub_parking_brake_ = this->create_subscription<std_msgs::msg::Float32>(
+      "/msfs/cmd/parking_brake", 10,
       [this](std_msgs::msg::Float32::SharedPtr msg)
       {
-        this->brake_callback(msg);
+        this->parking_brake_callback(msg);
       });
 
     // Baro setting (inHg)
     sub_baro_ = this->create_subscription<std_msgs::msg::Float32>(
-      "/msfs/cmd/baro_inhg", 10,
+      "/msfs/cmd/baro", 10,
       [this](std_msgs::msg::Float32::SharedPtr msg)
       {
         this->baro_callback(msg);
@@ -188,22 +182,19 @@ private:
       hSimConnect_, EVT_AXIS_ELEV_TRIM_SET, "AXIS_ELEV_TRIM_SET");
 
     SimConnect_MapClientEventToSimEvent(
-      hSimConnect_, EVT_AXIS_LEFT_BRAKE_SET,  "AXIS_LEFT_BRAKE_SET");
+      hSimConnect_, EVT_PARKING_BRAKE_SET, "PARKING_BRAKE_SET");
+
     SimConnect_MapClientEventToSimEvent(
-      hSimConnect_, EVT_AXIS_RIGHT_BRAKE_SET, "AXIS_RIGHT_BRAKE_SET");
+      hSimConnect_, EVT_KOHLSMAN_SET, "KOHLSMAN_SET");
 
     SimConnect_MapClientEventToSimEvent(
       hSimConnect_, EVT_AXIS_MIXTURE1_SET, "AXIS_MIXTURE1_SET");
   }
 
-  // Define settable SimVars for baro and gyro via SetDataOnSimObject
+  // Define settable SimVars for gyro via SetDataOnSimObject (baro uses KOHLSMAN_SET event)
   void define_settable_simvars()
   {
     if (!sim_connected_) return;
-
-    SimConnect_AddToDataDefinition(
-      hSimConnect_, DEFINITION_BARO,
-      "KOHLSMAN SETTING HG:1", "inHg");
 
     SimConnect_AddToDataDefinition(
       hSimConnect_, DEFINITION_DG,
@@ -310,32 +301,23 @@ private:
     send_axis_event(EVT_AXIS_ELEV_TRIM_SET, msg->data);
   }
 
-  void brake_callback(const std_msgs::msg::Float32::SharedPtr msg)
+  void parking_brake_callback(const std_msgs::msg::Float32::SharedPtr msg)
   {
     if (!sim_connected_) return;
 
-    float v = msg->data;
-    DWORD dw = zero_one_to_axis_dword(v);
-
-    HRESULT hr1 = SimConnect_TransmitClientEvent(
+    // PARKING_BRAKE_SET: data >= 0.5 -> engage (1), else disengage (0)
+    DWORD dw = (msg->data >= 0.5f) ? 1 : 0;
+    HRESULT hr = SimConnect_TransmitClientEvent(
       hSimConnect_,
       SIMCONNECT_OBJECT_ID_USER,
-      EVT_AXIS_LEFT_BRAKE_SET,
+      EVT_PARKING_BRAKE_SET,
       dw,
       SIMCONNECT_GROUP_PRIORITY_HIGHEST,
-      SIMCONNECT_EVENT_FLAG_DEFAULT);
+      SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY);
 
-    HRESULT hr2 = SimConnect_TransmitClientEvent(
-      hSimConnect_,
-      SIMCONNECT_OBJECT_ID_USER,
-      EVT_AXIS_RIGHT_BRAKE_SET,
-      dw,
-      SIMCONNECT_GROUP_PRIORITY_HIGHEST,
-      SIMCONNECT_EVENT_FLAG_DEFAULT);
-
-    if (hr1 != S_OK || hr2 != S_OK) {
+    if (hr != S_OK) {
       RCLCPP_WARN(get_logger(),
-        "Brake events failed (hr1=0x%08lx, hr2=0x%08lx)", hr1, hr2);
+        "Parking brake set failed (hr=0x%08lx)", hr);
     }
   }
 
@@ -343,20 +325,24 @@ private:
   {
     if (!sim_connected_) return;
 
-    BaroData data;
-    data.kohlsman_inhg = static_cast<double>(msg->data);
+    // KOHLSMAN_SET event takes Millibars * 16 (SetDataOnSimObject gives DATA_ERROR).
+    // inHg to mb: mb = inHg * 33.8639
+    double val = static_cast<double>(msg->data);
+    if (val < 27.0) val = 27.0;
+    if (val > 31.5) val = 31.5;
+    DWORD dw = static_cast<DWORD>(val * 33.8639 * 16.0);
 
-    HRESULT hr = SimConnect_SetDataOnSimObject(
+    HRESULT hr = SimConnect_TransmitClientEvent(
       hSimConnect_,
-      DEFINITION_BARO,
       SIMCONNECT_OBJECT_ID_USER,
-      0, 0,
-      sizeof(BaroData),
-      &data);
+      EVT_KOHLSMAN_SET,
+      dw,
+      SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+      SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY);
 
     if (hr != S_OK) {
       RCLCPP_WARN(get_logger(),
-        "SimConnect_SetDataOnSimObject (BARO) failed (hr=0x%08lx)", hr);
+        "KOHLSMAN_SET event failed (hr=0x%08lx)", hr);
     }
   }
 
@@ -420,7 +406,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr       sub_mixture_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr       sub_flaps_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr       sub_trim_;
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr       sub_brake_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr       sub_parking_brake_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr       sub_baro_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr       sub_dg_;
 };
